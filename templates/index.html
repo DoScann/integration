@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="ko"> 
+<html lang="ko">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -100,7 +100,7 @@
                 <input type="file" id="file-input" class="hidden" accept="image/*,.pdf">
             </div>
         </div>
-    </main> 
+    </main>
 
     <main id="panel-edit" class="hidden animate-fade-in">
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -154,20 +154,20 @@
                 </div>
 
                 <div class="bg-white border border-gray-200 rounded-xl shadow-sm p-6">
-                <h3 class="text-sm font-bold text-gray-900 uppercase mb-4">작업 실행</h3>
-                <div class="space-y-3">
-               <button onclick="processFile('ocr')" class="w-full flex justify-between items-center bg-neutral-900 text-white px-5 py-2.5 rounded-lg hover:bg-neutral-800 transition-colors group">
-               <span>보정 시작</span>
-            <i data-lucide="wand-2" class="w-4 h-4 opacity-50 group-hover:opacity-100"></i>
-        </button>
-    </div>
-</div>
+                    <h3 class="text-sm font-bold text-gray-900 uppercase mb-4">작업 실행</h3>
+                    <div class="space-y-3">
+                        <button onclick="processFile('ocr')" class="w-full flex justify-between items-center bg-neutral-900 text-white px-5 py-2.5 rounded-lg hover:bg-neutral-800 transition-colors group">
+                            <span>OCR 텍스트 추출</span>
+                            <i data-lucide="text-cursor" class="w-4 h-4 opacity-50 group-hover:opacity-100"></i>
+                        </button>
+                    </div>
+                </div>
             </div>
         </div>
     </main>
 
     <main id="panel-result" class="hidden animate-fade-in">
-        
+
         <div id="ocr-loading-spinner" class="absolute inset-0 bg-white/70 backdrop-blur-sm z-10 hidden flex items-center justify-center rounded-xl">
             <div class="flex flex-col items-center p-8 bg-white border border-gray-200 rounded-lg shadow-xl">
                 <div class="animate-spin rounded-full h-12 w-12 border-4 border-t-4 border-gray-200 border-t-neutral-900 mb-3"></div>
@@ -175,17 +175,17 @@
             </div>
         </div>
 
-        <div id="result-content" class="grid grid-cols-1 lg:grid-cols-2 gap-6 relative items-start"> 
-            
-            <div class="bg-white border border-gray-200 rounded-xl shadow-sm flex flex-col"> 
+        <div id="result-content" class="grid grid-cols-1 lg:grid-cols-2 gap-6 relative items-start">
+
+            <div class="bg-white border border-gray-200 rounded-xl shadow-sm flex flex-col">
                 <div class="p-4 border-b border-gray-200 flex justify-between items-center bg-gray-50 rounded-t-xl">
                     <span class="font-semibold text-sm text-gray-700">이미지 미리보기</span>
                     <button id="btn-save-image-result" onclick="saveResultImage()" class="text-sm border border-gray-300 bg-white text-gray-700 px-3 py-1.5 rounded-lg hover:bg-gray-50 transition-colors flex items-center shadow-sm hidden">
                         <i data-lucide="archive" class="w-3.5 h-3.5 mr-1.5"></i> 이미지 보관함에 저장
                     </button>
                 </div>
-                
-                <div class="p-6 flex items-center justify-center relative"> 
+
+                <div class="p-6 flex items-center justify-center relative">
                     <img id="result-image" class="hidden max-w-full shadow-lg rounded border border-gray-200">
                     <div id="result-pdf-icon" class="hidden text-center">
                         <i data-lucide="file-text" class="w-16 h-16 text-gray-300 mx-auto mb-2"></i>
@@ -193,8 +193,8 @@
                     </div>
                 </div>
             </div>
-            
-            <div class="bg-white border border-gray-200 rounded-xl shadow-sm flex flex-col"> 
+
+            <div class="bg-white border border-gray-200 rounded-xl shadow-sm flex flex-col">
                 <div class="p-4 border-b border-gray-200 flex justify-between items-center bg-gray-50 rounded-t-xl">
                     <span class="font-semibold text-sm text-gray-700">텍스트 추출 결과</span>
                     <div class="flex gap-2">
@@ -206,7 +206,7 @@
                         </button>
                     </div>
                 </div>
-                <div class="p-6"> 
+                <div class="p-6">
                     <pre id="result-text" class="text-sm text-gray-800 leading-relaxed whitespace-pre-wrap font-mono">텍스트를 추출해 주세요.</pre>
                 </div>
             </div>
@@ -244,28 +244,27 @@
     let canvasScale = 1;
     let selectedCorner = null;
     let isAutoDetected = false;
-    
-    // 모서리 최소 규격 (원본 이미지 크기 기준)
-     const canvas = document.getElementById('editor-canvas');
+
+    // OCR 후 서버에서 받은 "보정된 PNG" data URL
+    let lastProcessedImageData = null;
+
+    const canvas = document.getElementById('editor-canvas');
     const ctx = canvas.getContext('2d');
     let imageObj = new Image();
 
-    // --- 초기화 ---
     lucide.createIcons();
 
-    // --- 탭 전환 로직 ---
+    // --- 탭 전환 ---
     function switchTab(tabId) {
-        // 모든 패널 숨기기 & 버튼 비활성화
         ['upload', 'edit', 'result', 'saved'].forEach(id => {
             document.getElementById(`panel-${id}`).classList.add('hidden');
             document.getElementById(`tab-${id}`).classList.remove('active');
         });
 
-        // 선택된 탭 활성화
         document.getElementById(`panel-${tabId}`).classList.remove('hidden');
         document.getElementById(`tab-${tabId}`).classList.add('active');
 
-        lucide.createIcons(); // 아이콘 리로드
+        lucide.createIcons();
     }
 
     // --- 파일 업로드 ---
@@ -289,6 +288,8 @@
     function handleFile(file) {
         if (!file) return;
 
+        lastProcessedImageData = null;
+
         if (file.type === 'application/pdf') {
             currentFile = { type: 'pdf', file, name: file.name };
             setupEditor('pdf');
@@ -297,7 +298,7 @@
             reader.onload = (e) => {
                 currentFile = { type: 'image', file, name: file.name, preview: e.target.result };
                 imageObj.onload = () => {
-                    autoDetectCorners(); // 이미지 로드 후 자동 감지
+                    autoDetectCorners();
                     setupEditor('image');
                 };
                 imageObj.src = e.target.result;
@@ -313,12 +314,12 @@
         switchTab('edit');
 
         if (type === 'pdf') {
-            document.getElementById('canvas-container').classList.add('hidden'); // 캔버스 컨테이너 숨김
+            document.getElementById('canvas-container').classList.add('hidden');
             document.getElementById('pdf-preview').classList.remove('hidden');
             document.getElementById('pdf-name').textContent = currentFile.name;
-            document.getElementById('editor-canvas').classList.add('hidden'); // 캔버스 숨김
+            document.getElementById('editor-canvas').classList.add('hidden');
 
-            document.getElementById('image-options').classList.add('hidden'); // 이미지 옵션 숨김
+            document.getElementById('image-options').classList.add('hidden');
 
             document.getElementById('btn-reset-corners').classList.add('hidden');
             document.getElementById('auto-detect-msg').classList.add('hidden');
@@ -332,23 +333,21 @@
             document.getElementById('image-options').classList.remove('hidden');
 
             document.getElementById('btn-reset-corners').classList.remove('hidden');
-            // 버튼 이벤트 연결 (초기화)
             document.getElementById('btn-reset-corners').onclick = autoDetectCorners;
 
-            drawCanvas(); // 최초 그리기
+            drawCanvas();
         }
     }
 
-    // --- 캔버스 & 모서리 조작 (순수 JS) ---
+    // --- 코너 자동 감지(기본 사각형) ---
     function autoDetectCorners() {
         const w = imageObj.width;
         const h = imageObj.height;
-        const p = 40; // 패딩
+        const p = 40;
 
-        // 4개 모서리 자동 설정 (시뮬레이션)
         corners = [
-            {x: p, y: p}, {x: w-p, y: p},
-            {x: w-p, y: h-p}, {x: p, y: h-p}
+            {x: p, y: p}, {x: w - p, y: p},
+            {x: w - p, y: h - p}, {x: p, y: h - p}
         ];
         isAutoDetected = true;
         updateStatusMsg();
@@ -377,19 +376,16 @@
         canvas.height = containerHeight;
         canvasScale = ratio;
 
-        // 이미지 그리기
         ctx.drawImage(imageObj, 0, 0, canvas.width, canvas.height);
 
         if (corners.length > 0) {
-            // 어두운 배경
             ctx.fillStyle = 'rgba(0,0,0,0.4)';
             ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-            // 선택 영역 잘라내기
             ctx.save();
             ctx.beginPath();
             ctx.moveTo(corners[0].x * canvasScale, corners[0].y * canvasScale);
-            for(let i=1; i<corners.length; i++) {
+            for (let i = 1; i < corners.length; i++) {
                 ctx.lineTo(corners[i].x * canvasScale, corners[i].y * canvasScale);
             }
             ctx.closePath();
@@ -397,15 +393,13 @@
             ctx.drawImage(imageObj, 0, 0, canvas.width, canvas.height);
             ctx.restore();
 
-            // 테두리
             ctx.strokeStyle = '#2563eb';
             ctx.lineWidth = 2;
             ctx.stroke();
 
-            // 점
             corners.forEach((c, i) => {
                 ctx.beginPath();
-                ctx.arc(c.x * canvasScale, c.y * canvasScale, 8, 0, Math.PI*2);
+                ctx.arc(c.x * canvasScale, c.y * canvasScale, 8, 0, Math.PI * 2);
                 ctx.fillStyle = i === selectedCorner ? '#dc2626' : '#2563eb';
                 ctx.fill();
                 ctx.strokeStyle = 'white';
@@ -415,11 +409,11 @@
         }
     }
 
-    // 캔버스 마우스 이벤트
+    // 코너 드래그
     canvas.addEventListener('mousedown', handlePointerDown);
     canvas.addEventListener('mousemove', handlePointerMove);
     window.addEventListener('mouseup', () => { selectedCorner = null; });
-    // 터치 지원
+
     canvas.addEventListener('touchstart', (e) => handlePointerDown(e.touches[0]));
     canvas.addEventListener('touchmove', (e) => { e.preventDefault(); handlePointerMove(e.touches[0]); });
 
@@ -428,11 +422,10 @@
         const x = (e.clientX - rect.left) / canvasScale;
         const y = (e.clientY - rect.top) / canvasScale;
 
-        // 터치 영역 내의 코너 찾기
         const idx = corners.findIndex(c => Math.hypot(c.x - x, c.y - y) < 30);
         if (idx !== -1) {
             selectedCorner = idx;
-            isAutoDetected = false; // 사용자가 건드리면 자동 감지 해제
+            isAutoDetected = false;
             updateStatusMsg();
             drawCanvas();
         }
@@ -448,64 +441,99 @@
         drawCanvas();
     }
 
-    // 리사이즈 대응
-    window.addEventListener('resize', () => { if(currentFile?.type === 'image') drawCanvas(); });
+    window.addEventListener('resize', () => {
+        if (currentFile && currentFile.type === 'image') drawCanvas();
+    });
 
-    // --- 작업 처리 (OCR / 저장) ---
+    // --- OCR 실행 (백엔드 호출) ---
     async function processFile(action) {
-        if (action === 'ocr') {
-            // tab-result 활성화 전에 disabled 속성 제거
-            document.getElementById('tab-result').disabled = false; 
-            switchTab('result');
+        if (action !== 'ocr') return;
 
-            // 로딩 스피너 표시
-            const loadingSpinner = document.getElementById('ocr-loading-spinner');
-            loadingSpinner.classList.remove('hidden'); 
+        if (!currentFile) {
+            alert('먼저 파일을 업로드하세요.');
+            return;
+        }
 
-            // 백엔드 처리 시간 시뮬레이션 (3초)
-            await new Promise(resolve => setTimeout(resolve, 3000));
-            
-            loadingSpinner.classList.add('hidden'); // 로딩 종료
+        document.getElementById('tab-result').disabled = false;
+        switchTab('result');
 
+        const loadingSpinner = document.getElementById('ocr-loading-spinner');
+        loadingSpinner.classList.remove('hidden');
 
-            // 결과 데이터 채우기
-            const resultText = currentFile.type === 'pdf'
-                ? `[PDF OCR 결과 - ${currentFile.name}]\n\nPDF 문서의 전체 텍스트가 추출되었습니다. (예시)`
-                : `[IMG OCR 결과 - ${currentFile.name}]\n보정된 이미지로부터 텍스트가 추출되었습니다.\n\n상품명: DocuScan Pro 라이선스\n합계: 15,000원\n(예시 텍스트)`;
+        const formData = new FormData();
+        formData.append('file', currentFile.file);
+
+        if (currentFile.type === 'image' && corners && corners.length === 4) {
+            formData.append('corners', JSON.stringify(corners));
+        }
+
+        const optGrayscale = document.getElementById('opt-grayscale').checked;
+        const optShadow = document.getElementById('opt-shadow').checked;
+        formData.append('opt_grayscale', optGrayscale ? 'true' : 'false');
+        formData.append('opt_shadow', optShadow ? 'true' : 'false');
+
+        try {
+            const res = await fetch('/api/ocr', {
+                method: 'POST',
+                body: formData
+            });
+
+            loadingSpinner.classList.add('hidden');
+
+            if (!res.ok) {
+                let msg = 'OCR 중 오류가 발생했습니다.';
+                try {
+                    const err = await res.json();
+                    if (err.error) msg += '\n\n' + err.error;
+                } catch (e) {}
+                alert(msg);
+                return;
+            }
+
+            const data = await res.json();
+            const resultText = data.text || '';
+            lastProcessedImageData = data.image_data || null;
 
             document.getElementById('result-text').textContent = resultText;
 
             if (currentFile.type === 'image') {
-                document.getElementById('result-image').src = currentFile.preview;
+                const imgSrc = lastProcessedImageData || currentFile.preview;
+                document.getElementById('result-image').src = imgSrc;
                 document.getElementById('result-image').classList.remove('hidden');
                 document.getElementById('result-pdf-icon').classList.add('hidden');
-                // 이미지 저장 버튼 표시
-                document.getElementById('btn-save-image-result').classList.remove('hidden'); 
+                document.getElementById('btn-save-image-result').classList.remove('hidden');
             } else {
                 document.getElementById('result-image').classList.add('hidden');
                 document.getElementById('result-pdf-icon').classList.remove('hidden');
-                // PDF는 저장 버튼 숨김
                 document.getElementById('btn-save-image-result').classList.add('hidden');
             }
-            lucide.createIcons(); // 아이콘 리로드
+
+            lucide.createIcons();
+
+        } catch (e) {
+            console.error(e);
+            loadingSpinner.classList.add('hidden');
+            alert('서버에 연결할 수 없습니다.');
         }
     }
-    
+
+    // OCR 결과의 "보정된 이미지"를 보관함에 저장
     function saveResultImage() {
-        if (currentFile?.type !== 'image') {
+        if (!currentFile || currentFile.type !== 'image') {
             alert('이미지 파일만 보관함에 저장할 수 있습니다.');
             return;
         }
+        const preview = lastProcessedImageData || currentFile.preview;
+
         const item = {
             id: Date.now(),
-            preview: currentFile.preview, // 실제로는 캔버스에서 처리된 이미지를 저장해야 합니다.
+            preview: preview,
             date: new Date().toLocaleDateString()
         };
         savedItems.push(item);
         updateSavedGallery();
         alert('보관함에 저장되었습니다.');
     }
-
 
     // --- 보관함 관리 ---
     function updateSavedGallery() {
@@ -515,7 +543,7 @@
         const countBadge = document.getElementById('saved-count');
 
         countBadge.textContent = savedItems.length;
-        btnMerge.disabled = savedItems.length < 2; // 병합은 2개 이상일 때 활성화 (선택적으로 수정 가능)
+        btnMerge.disabled = savedItems.length < 2;
 
         if (savedItems.length === 0) {
             grid.classList.add('hidden');
@@ -531,21 +559,21 @@
             const div = document.createElement('div');
             div.className = 'group bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden hover:shadow-md transition-all';
             div.innerHTML = `
-                        <div class="aspect-[3/4] bg-gray-100 relative overflow-hidden border-b border-gray-100">
-                            <img src="${item.preview}" class="w-full h-full object-cover">
-                            <div class="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                                <button onclick="deleteSaved(${item.id})" class="bg-white/90 p-1.5 rounded-full text-red-500 hover:bg-red-50 shadow-sm">
-                                    <i data-lucide="trash-2" class="w-4 h-4"></i>
-                                </button>
-                            </div>
-                        </div>
-                        <div class="p-3">
-                            <p class="text-xs text-gray-400 font-medium mb-2">${item.date}</p>
-                            <button onclick="downloadSaved('${item.preview}', ${item.id})" class="w-full text-sm border border-gray-200 rounded py-1.5 hover:bg-gray-50 flex items-center justify-center">
-                                <i data-lucide="download" class="w-3.5 h-3.5 mr-1.5"></i> 다운로드
-                            </button>
-                        </div>
-                    `;
+                <div class="aspect-[3/4] bg-gray-100 relative overflow-hidden border-b border-gray-100">
+                    <img src="${item.preview}" class="w-full h-full object-cover">
+                    <div class="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button onclick="deleteSaved(${item.id})" class="bg-white/90 p-1.5 rounded-full text-red-500 hover:bg-red-50 shadow-sm">
+                            <i data-lucide="trash-2" class="w-4 h-4"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="p-3">
+                    <p class="text-xs text-gray-400 font-medium mb-2">${item.date}</p>
+                    <button onclick="downloadSaved('${item.preview}', ${item.id})" class="w-full text-sm border border-gray-200 rounded py-1.5 hover:bg-gray-50 flex items-center justify-center">
+                        <i data-lucide="download" class="w-3.5 h-3.5 mr-1.5"></i> 다운로드
+                    </button>
+                </div>
+            `;
             grid.appendChild(div);
         });
         lucide.createIcons();
@@ -556,30 +584,95 @@
         updateSavedGallery();
     }
 
+    // 보관함 개별 PNG 저장 (파일 이름 입력)
     function downloadSaved(url, id) {
+        let filename = prompt("저장할 파일 이름을 입력하세요", `scan_${id}.png`);
+        if (!filename) return;
+        filename = filename.trim();
+        if (!/\.(png|jpg|jpeg|webp|bmp|gif)$/i.test(filename)) {
+            filename += ".png";
+        }
         const a = document.createElement('a');
         a.href = url;
-        a.download = `scan_${id}.png`;
+        a.download = filename;
         a.click();
     }
 
-    function mergePDF() {
-        alert(`${savedItems.length}개의 이미지를 PDF로 병합하여 다운로드합니다.`);
+    // 보관함 PNG들 → 하나의 PDF 파일로 병합
+    async function mergePDF() {
+        if (savedItems.length === 0) {
+            alert('보관함에 이미지가 없습니다.');
+            return;
+        }
+
+        let filename = prompt("저장할 PDF 파일 이름을 입력하세요", "merged.pdf");
+        if (!filename) return;
+        filename = filename.trim();
+        if (!filename.toLowerCase().endsWith(".pdf")) {
+            filename += ".pdf";
+        }
+
+        try {
+            const res = await fetch('/api/merge_pdf', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    images: savedItems.map(i => i.preview)
+                })
+            });
+
+            if (!res.ok) {
+                let msg = 'PDF 병합 중 오류가 발생했습니다.';
+                try {
+                    const err = await res.json();
+                    if (err.error) msg += '\n\n' + err.error;
+                } catch (e) {}
+                alert(msg);
+                return;
+            }
+
+            const data = await res.json();
+            const pdfDataUrl = data.pdf_data;
+            if (!pdfDataUrl) {
+                alert('PDF 데이터가 비어 있습니다.');
+                return;
+            }
+
+            const a = document.createElement('a');
+            a.href = pdfDataUrl;
+            a.download = filename;
+            a.click();
+
+        } catch (e) {
+            console.error(e);
+            alert('서버와 통신 중 오류가 발생했습니다.');
+        }
     }
 
-    // --- 유틸리티 ---
+    // --- 텍스트 복사/저장 ---
     function copyResultText() {
         const text = document.getElementById('result-text').textContent;
         navigator.clipboard.writeText(text);
         alert('복사되었습니다.');
     }
+
     function downloadResultText() {
         const text = document.getElementById('result-text').textContent;
+        if (!text) {
+            alert('저장할 텍스트가 없습니다.');
+            return;
+        }
+        let filename = prompt("저장할 텍스트 파일 이름을 입력하세요", "ocr.txt");
+        if (!filename) return;
+        filename = filename.trim();
+        if (!filename.toLowerCase().endsWith(".txt")) {
+            filename += ".txt";
+        }
         const a = document.createElement("a");
         a.href = URL.createObjectURL(new Blob([text], {type: 'text/plain'}));
-        a.download = "ocr.txt"; a.click();
+        a.download = filename;
+        a.click();
     }
-
 </script>
 </body>
 </html>
