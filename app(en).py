@@ -89,7 +89,8 @@ def run_ocr_on_image(pil_image: Image.Image) -> str:
             mag_ratio=1.0,      # 이미 전처리에서 확대함
             adjust_contrast=0.5,
             x_ths=1.0,          # 가로 간격 허용치 (띄어쓰기 관대하게)
-            y_ths=0.5           # 세로 간격 허용치 (줄바꿈 관대하게)
+            y_ths=0.5,           # 세로 간격 허용치 (줄바꿈 관대하게)
+            beamWidth=5          #빔서치 기능(단어가 헷갈릴 경우에 문맥을 보고 파악)
         )
         
         raw_text = "\n\n".join(result)
