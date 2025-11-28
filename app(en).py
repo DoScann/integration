@@ -2,272 +2,286 @@ import io
 import os
 import base64
 import json
-import logging
+import time
 import traceback
+import logging
 
 from flask import Flask, render_template, request, jsonify
 from PIL import Image
 import numpy as np
 import cv2
 import easyocr
-
-# [추가] 스펠링 체크 라이브러리
 from spellchecker import SpellChecker
+from cv2 import dnn_superres
 
+# 1. 설정 및 초기화
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"))
 
-app = Flask(
-    __name__,
-    template_folder=os.path.join(BASE_DIR, "templates")
-)
+print("=== 서버 초기화 중 ===")
 
-# --- EasyOCR 초기화 ---
-print("EasyOCR 모델 로딩 중... (잠시만 기다려주세요)")
-# [변경] 'ko'를 제거하고 'en'만 남겨 영어 인식률을 극대화합니다.
-reader = easyocr.Reader(['en'], gpu=False)
-
-# [추가] 영어 스펠링 체커 초기화
+# [모드 1] 영어/스펠링 체크용 리소스
+print("1. 영어 전용 OCR 로드 중...")
+reader_en = easyocr.Reader(['en'], gpu=False) 
 spell = SpellChecker()
-print("EasyOCR & SpellChecker 로드 완료!")
 
+# [모드 2] 한글/AI 고화질용 리소스
+print("2. 한글 공용 OCR 로드 중...")
+reader_ko = easyocr.Reader(['ko', 'en'], gpu=False) 
 
-@app.route("/")
-def index():
-    return render_template("index.html")
+print("3. AI Super Resolution 모델 로드 중...")
+sr = dnn_superres.DnnSuperResImpl_create()
+model_path = os.path.join(BASE_DIR, "EDSR_x4.pb")
+ai_loaded = False
 
+if os.path.exists(model_path):
+    try:
+        sr.readModel(model_path)
+        sr.setModel("edsr", 4)
+        ai_loaded = True
+        print("   ✅ AI Model Loaded (EDSR_x4)")
+    except Exception as e:
+        print(f"   ❌ AI Model Error: {e}")
+else:
+    print(f"   ⚠️ Warning: 모델 파일 없음 ({model_path}) - AI 기능 비활성화됨")
 
+# ==========================================
+#  [공통 유틸리티]
+# ==========================================
+def pil_to_base64(pil_image):
+    buf = io.BytesIO()
+    pil_image.save(buf, format="PNG")
+    buf.seek(0)
+    return "data:image/png;base64," + base64.b64encode(buf.read()).decode("utf-8")
+
+# ==========================================
+#  [Code 1 로직] 영어/영수증 특화 함수들
+# ==========================================
 def fix_spelling(text):
-    """
-    [후처리] OCR 결과 텍스트의 오타를 교정하는 함수
-    """
-    if not text:
-        return ""
-
+    """영어 스펠링 교정"""
+    if not text: return ""
     lines = text.split('\n')
     corrected_lines = []
-
     for line in lines:
         words = line.split()
         corrected_words = []
-        
         for word in words:
-            # 특수문자가 섞인 경우 등을 대비해 순수 알파벳인 경우만 필터링
             clean_word = ''.join(filter(str.isalpha, word))
-            
-            # 3글자 이상인 단어만 검사 (짧은 단어는 오교정 확률 높음)
-            if clean_word and len(clean_word) > 2:
-                # 사전에 없는 단어인지 확인
-                if clean_word.lower() not in spell:
-                    # 가장 유력한 정답 단어 추천
-                    correction = spell.correction(clean_word)
-                    
-                    # 교정된 단어가 있으면 교체
-                    if correction:
-                        corrected_words.append(correction)
-                    else:
-                        corrected_words.append(word)
-                else:
-                    corrected_words.append(word) # 사전에 있으면 그대로 둠
+            if clean_word and len(clean_word) > 2 and clean_word.lower() not in spell:
+                correction = spell.correction(clean_word)
+                corrected_words.append(correction if correction else word)
             else:
-                corrected_words.append(word) # 알파벳 아니면 그대로 둠
-        
+                corrected_words.append(word)
         corrected_lines.append(" ".join(corrected_words))
-
     return "\n".join(corrected_lines)
 
-
-def run_ocr_on_image(pil_image: Image.Image) -> str:
-    """EasyOCR 실행 함수"""
+def process_english_mode(pil_image, corners=None):
+    """영어 모드 전처리"""
     img_np = np.array(pil_image)
     
-    try:
-        result = reader.readtext(
-            img_np, 
-            detail=0,
-            paragraph=True,     # 문단 인식 모드 (자연스러운 연결)
-            canvas_size=4096,   # 고해상도 처리
-            mag_ratio=1.0,      # 이미 전처리에서 확대함
-            adjust_contrast=0.5,
-            x_ths=1.0,          # 가로 간격 허용치 (띄어쓰기 관대하게)
-            y_ths=0.5,           # 세로 간격 허용치 (줄바꿈 관대하게)
-            beamWidth=5          #빔서치 기능(단어가 헷갈릴 경우에 문맥을 보고 파악)
-        )
-        
-        raw_text = "\n\n".join(result)
-        
-        # [추가] 스펠링 교정 수행
-        final_text = fix_spelling(raw_text)
-        
-        return final_text
-        
-    except Exception as e:
-        print(f"EasyOCR Error: {e}")
-        return "텍스트를 인식할 수 없습니다."
-
-
-def handle_transparency(img_cv):
-    """[추가] 투명 배경(Alpha) 처리 -> 흰색 배경으로 병합"""
-    if img_cv.shape[2] == 4:  # 채널이 4개면(RGBA) 투명도가 있다는 뜻
-        # 알파 채널 분리
-        alpha_channel = img_cv[:, :, 3]
-        rgb_channels = img_cv[:, :, :3]
-
-        # 마스크 생성 (투명한 부분 = 0)
-        # 투명하지 않은 부분은 그대로(1.0), 투명한 부분은 흰색(255)으로 대체 계산
-        
-        # 간단하게: 투명한 픽셀(alpha < 255)을 흰색으로 덮어씌우기
-        white_bg_img = np.full_like(rgb_channels, 255)
-        
-        # 알파값 정규화 (0.0 ~ 1.0)
-        alpha_factor = alpha_channel[:, :, np.newaxis] / 255.0
-        
-        # 합성이미지 = (원본RGB * 알파) + (흰배경 * (1-알파))
-        base = rgb_channels.astype(float) * alpha_factor
-        white = white_bg_img.astype(float) * (1 - alpha_factor)
-        final_img = (base + white).astype(np.uint8)
-        
-        return final_img
-    return img_cv
-
-
-def process_image_core(pil_image, corners=None, opt_grayscale=False, opt_shadow=False):
-    """
-    [극한의 전처리 파이프라인]
-    1. 투명도 제거 (흰색 배경)
-    2. 투시 변환
-    3. 2배~3배 확대
-    4. 양방향 필터 (노이즈 제거 + 엣지 보존)
-    5. 모폴로지 닫기 (점선 잇기 - 영수증 핵심)
-    6. CLAHE (스마트 대비)
-    7. 선명화
-    """
-    img_np = np.array(pil_image)
-    
-    # 1. [신규] 투명도 처리 (PNG 대응)
+    # 투명도 처리
     if len(img_np.shape) == 3 and img_np.shape[2] == 4:
-        img_np = handle_transparency(img_np)
-    
-    # RGB -> BGR (OpenCV용)
+        alpha = img_np[:, :, 3]
+        rgb = img_np[:, :, :3]
+        white_bg = np.full_like(rgb, 255)
+        alpha_factor = alpha[:, :, np.newaxis] / 255.0
+        img_np = (rgb.astype(float) * alpha_factor + white_bg.astype(float) * (1 - alpha_factor)).astype(np.uint8)
+
+    # 투시 변환
+    if corners:
+        img_np = apply_perspective_transform(img_np, corners)
+
     if len(img_np.shape) == 3:
         img_cv = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
     else:
         img_cv = img_np
 
-    # 2. 투시 변환
-    if corners and len(corners) == 4:
-        try:
-            pts = np.float32([[c["x"], c["y"]] for c in corners])
-            widthA = np.linalg.norm(pts[2] - pts[3])
-            widthB = np.linalg.norm(pts[1] - pts[0])
-            maxWidth = int(max(widthA, widthB))
-            heightA = np.linalg.norm(pts[1] - pts[2])
-            heightB = np.linalg.norm(pts[0] - pts[3])
-            maxHeight = int(max(heightA, heightB))
+    # 단순 확대
+    img_cv = cv2.resize(img_cv, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+    img_cv = cv2.bilateralFilter(img_cv, 9, 75, 75)
+    
+    gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+    gray = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
+    
+    clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
+    gray = clahe.apply(gray)
+    kernel_sharp = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
+    gray = cv2.filter2D(gray, -1, kernel_sharp)
 
-            if maxWidth > 0 and maxHeight > 0:
-                dst = np.float32([[0, 0], [maxWidth - 1, 0], [maxWidth - 1, maxHeight - 1], [0, maxHeight - 1]])
-                M = cv2.getPerspectiveTransform(pts, dst)
-                img_cv = cv2.warpPerspective(img_cv, M, (maxWidth, maxHeight), flags=cv2.INTER_CUBIC)
+    return Image.fromarray(cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB))
+
+# ==========================================
+#  [Code 2 로직] 한글/AI 고화질 특화 함수들
+# ==========================================
+def group_ocr_results(results):
+    """줄바꿈 그룹핑 알고리즘"""
+    if not results: return ""
+    boxes = []
+    for (bbox, text, prob) in results:
+        (tl, tr, br, bl) = bbox
+        cy = (tl[1] + bl[1]) / 2
+        cx = (tl[0] + tr[0]) / 2
+        h = bl[1] - tl[1]
+        boxes.append({'text': text, 'cy': cy, 'cx': cx, 'h': h})
+    
+    boxes = sorted(boxes, key=lambda k: k['cy'])
+    lines = []
+    current_line = []
+    if boxes: current_line.append(boxes[0])
+    
+    for i in range(1, len(boxes)):
+        prev = current_line[-1]
+        curr = boxes[i]
+        if abs(curr['cy'] - prev['cy']) < (prev['h'] * 0.6):
+            current_line.append(curr)
+        else:
+            current_line = sorted(current_line, key=lambda k: k['cx'])
+            lines.append(current_line)
+            current_line = [curr]
+    if current_line:
+        current_line = sorted(current_line, key=lambda k: k['cx'])
+        lines.append(current_line)
+        
+    return "\n".join(["   ".join([item['text'] for item in line]) for line in lines])
+
+def process_korean_mode(pil_image, corners=None, opt_grayscale=False, opt_shadow=False):
+    """
+    [수정됨] 한글 모드 전처리
+    - 사용자 옵션(그림자/흑백)을 강제하지 않고 존중하도록 수정
+    - Code 2의 우수한 전처리 파이프라인 적용
+    """
+    img_np = np.array(pil_image)
+
+    # 투시 변환
+    if corners:
+        img_np = apply_perspective_transform(img_np, corners)
+
+    # RGB -> BGR
+    img_cv = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+
+    # 1. AI 업스케일링 (가로 1000px 미만일 때만 - Code 2 기준 적용)
+    h, w = img_cv.shape[:2]
+    if ai_loaded and w < 1000: 
+        try:
+            img_cv = sr.upsample(img_cv)
         except: pass
 
-    # 3. 확대 (Upscaling)
-    scale = 2.0
-    img_cv = cv2.resize(img_cv, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-
-    # 4. [신규] 양방향 필터 (Bilateral Filter)
-    # 종이 질감(노이즈)은 없애고 글자 획(엣지)은 살립니다.
-    # d=9 (직경), sigmaColor=75 (색공간), sigmaSpace=75 (좌표공간)
-    try:
-        img_cv = cv2.bilateralFilter(img_cv, 9, 75, 75)
-    except: pass
-
-    # 그레이스케일 변환
+    # 2. 그레이스케일 변환
     if len(img_cv.shape) == 3:
         gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
     else:
         gray = img_cv
 
-    # 5. [신규] 모폴로지 닫기 (Morphological Closing)
-    # 도트 폰트(.....) 사이의 구멍을 잉크로 메워줍니다. 영수증 인식률에 큰 도움 됩니다.
-    try:
-        # 커널 크기 (2, 2): 너무 크면 글자가 뭉개지므로 아주 작게 설정
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-        gray = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
-    except: pass
+    # 3. CLAHE (대비 향상)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
 
-    # 6. CLAHE (스마트 대비) - 그림자 제거 옵션과 상관없이 약하게라도 적용하면 좋음
+    # 4. 노이즈 제거 (Gaussian Blur) - Code 2의 방식
+    denoised = cv2.GaussianBlur(enhanced, (3, 3), 0)
+
+    # 5. 샤프닝
+    kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
+    sharpened = cv2.filter2D(denoised, -1, kernel)
+    
+    # 6. 그림자 제거 (사용자 옵션이 켜져있을 때만 수행!)
     if opt_shadow:
         try:
-            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-            gray = clahe.apply(gray)
-        except: pass
-    else:
-        # 옵션이 꺼져있어도 기본적으로 약하게 적용 (전반적 가독성 향상)
-        try:
-            clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
-            gray = clahe.apply(gray)
+            # 샤프닝 된 이미지 기준으로 다시 RGB 가짜 변환 후 처리 (로직상 이득)
+            temp_rgb = cv2.cvtColor(sharpened, cv2.COLOR_GRAY2BGR)
+            rgb_planes = cv2.split(temp_rgb)
+            result_planes = []
+            for plane in rgb_planes:
+                dilated = cv2.dilate(plane, np.ones((7, 7), np.uint8))
+                bg = cv2.medianBlur(dilated, 21)
+                diff = 255 - cv2.absdiff(plane, bg)
+                norm = cv2.normalize(diff, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8UC1)
+                result_planes.append(norm)
+            sharpened = result_planes[0] # 그레이스케일이므로 첫 채널만 취함
         except: pass
 
-    # 7. 선명화 (Sharpening)
-    try:
-        kernel_sharp = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
-        gray = cv2.filter2D(gray, -1, kernel_sharp)
-    except: pass
-
-    # 8. 최종 변환 (흑백 옵션)
+    # 7. 흑백/컬러 반환 결정
     if opt_grayscale:
-        img_result = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB) # 보여줄 땐 RGB 형식의 흑백
+        # 흑백 모드면 전처리된 그레이스케일 그대로 반환
+        return Image.fromarray(cv2.cvtColor(sharpened, cv2.COLOR_GRAY2RGB))
     else:
-        # 컬러로 복구하려면 원본 색감이 필요하지만, 위에서 이미 변형이 많이 일어남.
-        # 인식용으로는 흑백 처리된 결과가 더 좋으므로, 여기서는 처리된 흑백 이미지를 반환합니다.
-        img_result = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
+        # 컬러 모드여도 인식률을 위해 전처리된 이미지를 반환하되,
+        # 원본 색감을 원하면 여기서 img_np를 반환해야 함. 
+        # 하지만 OCR 인식용이므로 전처리된 이미지를 주는 게 맞음.
+        return Image.fromarray(cv2.cvtColor(sharpened, cv2.COLOR_GRAY2RGB))
 
-    return Image.fromarray(img_result)
+def apply_perspective_transform(img_np, corners):
+    try:
+        pts = np.float32([[c["x"], c["y"]] for c in corners])
+        widthA = np.linalg.norm(pts[2] - pts[3])
+        widthB = np.linalg.norm(pts[1] - pts[0])
+        maxWidth = int(max(widthA, widthB))
+        heightA = np.linalg.norm(pts[1] - pts[2])
+        heightB = np.linalg.norm(pts[0] - pts[3])
+        maxHeight = int(max(heightA, heightB))
+        dst = np.float32([[0, 0], [maxWidth - 1, 0], [maxWidth - 1, maxHeight - 1], [0, maxHeight - 1]])
+        M = cv2.getPerspectiveTransform(pts, dst)
+        return cv2.warpPerspective(img_np, M, (maxWidth, maxHeight), flags=cv2.INTER_CUBIC)
+    except:
+        return img_np
 
-
-def pil_to_data_url(pil_image):
-    buf = io.BytesIO()
-    pil_image.save(buf, format="PNG")
-    buf.seek(0)
-    b64 = base64.b64encode(buf.read()).decode("utf-8")
-    return "data:image/png;base64," + b64
-
+# ==========================================
+#  [API 라우트]
+# ==========================================
+@app.route("/")
+def index():
+    return render_template("index.html")
 
 @app.route("/api/ocr", methods=["POST"])
 def api_ocr():
     if "file" not in request.files: return jsonify({"error": "파일이 없습니다."}), 400
     file = request.files["file"]
-    if file.filename == "": return jsonify({"error": "파일명이 비어있습니다."}), 400
     
-    file_bytes = file.read()
-    corners_json = request.form.get("corners", None)
+    scan_mode = request.form.get("scan_mode", "korean")
+    corners_json = request.form.get("corners")
+    
+    # [수정됨] 사용자 옵션 받기 (문자열 "true" -> 불리언 True)
     opt_grayscale = request.form.get("opt_grayscale", "false") == "true"
     opt_shadow = request.form.get("opt_shadow", "false") == "true"
-
-    if file.mimetype == "application/pdf" or file.filename.lower().endswith(".pdf"):
-        return jsonify({"text": "PDF는 지원하지 않습니다.", "image_data": None})
-
+    
     try:
-        img = Image.open(io.BytesIO(file_bytes)).convert("RGB")
+        img = Image.open(io.BytesIO(file.read())).convert("RGB")
+        corners = json.loads(corners_json) if corners_json else None
+        
+        processed_img = None
+        ocr_text = ""
+        start_time = time.time()
 
-        corners = None
-        if corners_json:
-            try: corners = json.loads(corners_json)
-            except: pass
+        if scan_mode == "english":
+            print(">>> [모드 실행] 영어/스펠링체크 모드")
+            # 영어 모드는 opt_shadow 등의 옵션을 내부적으로 자동 처리하거나 무시 (기존 유지)
+            processed_img = process_english_mode(img, corners)
+            raw_results = reader_en.readtext(np.array(processed_img), detail=1, paragraph=False)
+            grouped_text = group_ocr_results(raw_results)
+            ocr_text = fix_spelling(grouped_text)
+            
+        else: # scan_mode == "korean"
+            print(">>> [모드 실행] 한글/AI고화질 모드")
+            
+            # [수정됨] 사용자 옵션을 함수에 전달!
+            processed_img = process_korean_mode(img, corners, opt_grayscale, opt_shadow)
+            
+            raw_results = reader_ko.readtext(np.array(processed_img), detail=1, paragraph=False)
+            ocr_text = group_ocr_results(raw_results)
 
-        processed = process_image_core(img, corners, opt_grayscale, opt_shadow)
-        ocr_text = run_ocr_on_image(processed)
-        processed_data_url = pil_to_data_url(processed)
+        elapsed = time.time() - start_time
+        print(f"처리 완료: {elapsed:.2f}초 소요")
 
         return jsonify({
             "text": ocr_text,
-            "image_data": processed_data_url
+            "image_data": pil_to_base64(processed_img),
+            "mode": scan_mode,
+            "time": f"{elapsed:.2f}s"
         })
 
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
-
 
 @app.route("/api/merge_pdf", methods=["POST"])
 def api_merge_pdf():
@@ -275,24 +289,16 @@ def api_merge_pdf():
         data = request.get_json(force=True)
         images = data.get("images", [])
         if not images: return jsonify({"error": "이미지가 없습니다."}), 400
-
         pil_images = []
         for url in images:
-            if "," in url: _, b64 = url.split(",", 1)
-            else: b64 = url
-            img_bytes = base64.b64decode(b64)
-            pil_images.append(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
-
-        if not pil_images: return jsonify({"error": "유효한 이미지가 없습니다."}), 400
-
+            b64 = url.split(",", 1)[1] if "," in url else url
+            pil_images.append(Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB"))
         buf = io.BytesIO()
         pil_images[0].save(buf, format="PDF", save_all=True, append_images=pil_images[1:])
         buf.seek(0)
         return jsonify({"pdf_data": "data:application/pdf;base64," + base64.b64encode(buf.read()).decode("utf-8")})
-
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
